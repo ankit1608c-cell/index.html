@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Platinova Bike Meter Tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f4f6;color:#111827;font-family:Arial,sans-serif}.app{max-width:760px;margin:auto;padding:16px}h1{font-size:25px;margin:8px 0}.sub{color:#6b7280;margin-bottom:16px}.card{background:white;border-radius:16px;padding:16px;margin-bottom:14px;box-shadow:0 2px 10px #0000000c}label{display:block;font-weight:700;margin:12px 0 6px}input,select,button{width:100%;padding:13px;border:1px solid #d1d5db;border-radius:10px;font-size:16px}button{border:0;background:#111827;color:white;font-weight:700;margin-top:12px;cursor:pointer}button.secondary{background:#e5e7eb;color:#111827}button:disabled{opacity:.55}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.notice{font-size:13px;color:#4b5563;line-height:1.5}.preview{width:100%;max-height:360px;object-fit:contain;background:#f9fafb;border-radius:10px;margin-top:12px;display:none}.liveVideo{width:100%;max-height:360px;object-fit:contain;background:#111827;border-radius:10px;margin-top:12px;display:none}.buttonGrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.buttonGrid button{min-width:0}.status{font-size:14px;margin-top:10px;white-space:pre-wrap}.result{padding:12px;background:#eef2ff;border-radius:10px;margin-top:12px}.good{color:#166534}.bad{color:#b91c1c}.small{font-size:12px;color:#6b7280}.hide{display:none}@media(max-width:480px){.grid{grid-template-columns:1fr}}
+</style></head>
+<body><main class="app">
+<h1>🏍️ Bike Meter Tracker</h1><div class="sub">Take a meter photo, confirm the reading, and save it with location.</div>
+<div class="card">
+<label for="date">Date</label><input type="date" id="date">
+<label for="employee">Employee</label><select id="employee"><option>Rahul</option><option>Beeru</option><option>Anshul</option><option>Sachin</option><option>Nikesh</option><option>Vimal</option><option>Harvir</option><option>Rudal</option><option>Karan</option></select>
+<label for="session">Reading session</label><select id="session"><option value="Morning">Morning — when arriving at office</option><option value="Evening">Evening — after the day's work</option></select>
+<p class="notice">Digital displays and rotating number wheels are both supported, but OCR can misread digits. Keep the meter straight, well-lit, and in focus. Always check the number before saving.</p>
+<label>Live camera scanning</label>
+<div class="notice">Use the live camera to line up either a digital display or rotating number wheels. Tap <b>Scan live frame</b> to read the digits from what the camera currently sees. The captured frame becomes the saved evidence photo.</div>
+<div class="buttonGrid"><button id="startCameraBtn" type="button">Start live camera</button><button id="stopCameraBtn" type="button" class="secondary" disabled>Stop camera</button></div>
+<video id="liveVideo" class="liveVideo" autoplay playsinline muted></video>
+<div class="buttonGrid"><button id="liveScanBtn" type="button" class="secondary" disabled>Scan live frame</button><button id="captureBtn" type="button" class="secondary" disabled>Capture photo only</button></div>
+<div class="small">If live camera access is unavailable, you can still upload/take a photo below.</div>
+<label for="photo">Or take/upload a meter photo</label><input id="photo" type="file" accept="image/*" capture="environment">
+<img id="preview" class="preview" alt="Captured bike meter photo">
+<div id="ocrStatus" class="status" aria-live="polite"></div>
+<label for="reading">Confirm / edit meter reading</label><input id="reading" type="number" min="0" step="any" inputmode="decimal" placeholder="The detected number will appear here">
+<div class="grid"><button id="scanBtn" type="button" class="secondary" disabled>Read number again</button><button id="saveBtn" type="button" disabled>Save this reading</button></div>
+<div id="locationStatus" class="status">Location will be requested when you take a photo.</div>
+<div id="saveStatus" class="status"></div>
+</div>
+<div class="card"><h2>How daily kilometres are calculated</h2><p class="notice">Enter the morning reading when the employee arrives at the office and the evening reading separately after returning. Daily kilometres = evening reading − morning reading. The Google Sheet backend below stores each session as a separate row, including the photo link and location. It flags missing pairs or an evening reading lower than the morning reading for review.</p></div>
+<div class="card"><h3>Important setup</h3><p class="notice">This page needs the Google Apps Script Web App URL pasted into the code below. OCR uses an online library, and camera/location permissions work best when this page is hosted on HTTPS (for example, GitHub Pages) rather than opened as a local file.</p></div>
+</main>
+<script>
+// Replace this with your deployed Google Apps Script Web App URL.
+const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwcX9WI0fqIIK_AZLFlruLVMd6OxIS6TtY3lrY_pjp5M-NkRNpm7xEHcLAB4KAJtb0/exec";
+const employees = ["Rahul","Beeru","Anshul","Sachin","Nikesh","Vimal","Harvir","Rudal","Karan"];
+const $ = id => document.getElementById(id);
+let imageDataUrl = "", locationData = null, ocrWorker = null, cameraStream = null, liveScanBusy = false;
+function localDate(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
+$('date').value=localDate();
+$('employee').innerHTML=employees.map(n=>`<option value="${n}">${n}</option>`).join('');
+function setStatus(id,msg,cls=''){ $(id).textContent=msg; $(id).className='status '+cls; }
+function updateSaveState(){ $('saveBtn').disabled=!(imageDataUrl && $('reading').value.trim()!=='' && Number($('reading').value)>=0); }
+$('reading').addEventListener('input',updateSaveState);
+
+async function startLiveCamera(){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){setStatus('ocrStatus','Live camera is not available in this browser. Use the photo option below.','bad');return;}
+  try{
+    cameraStream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
+    $('liveVideo').srcObject=cameraStream; $('liveVideo').style.display='block'; await $('liveVideo').play();
+    $('startCameraBtn').disabled=true; $('stopCameraBtn').disabled=false; $('liveScanBtn').disabled=false; $('captureBtn').disabled=false;
+    setStatus('ocrStatus','Live camera is on. Center the meter, keep it steady, then tap “Scan live frame”.');
+    getLocation();
+  }catch(err){setStatus('ocrStatus','Could not start camera. Allow camera permission and open this page over HTTPS. You can use the photo option instead. '+err.message,'bad');}
+}
+function stopLiveCamera(){if(cameraStream){cameraStream.getTracks().forEach(t=>t.stop());cameraStream=null;} $('liveVideo').srcObject=null;$('liveVideo').style.display='none';$('startCameraBtn').disabled=false;$('stopCameraBtn').disabled=true;$('liveScanBtn').disabled=true;$('captureBtn').disabled=true;}
+function grabLiveFrame(){const v=$('liveVideo');if(!cameraStream||!v.videoWidth)throw new Error('Start the camera and wait for the picture to appear.');const c=document.createElement('canvas');const scale=Math.min(1,1600/Math.max(v.videoWidth,v.videoHeight));c.width=Math.round(v.videoWidth*scale);c.height=Math.round(v.videoHeight*scale);c.getContext('2d').drawImage(v,0,0,c.width,c.height);return c.toDataURL('image/jpeg',0.88);}
+$('startCameraBtn').addEventListener('click',startLiveCamera);
+$('stopCameraBtn').addEventListener('click',stopLiveCamera);
+$('liveScanBtn').addEventListener('click',async()=>{if(liveScanBusy)return;liveScanBusy=true;$('liveScanBtn').disabled=true;try{imageDataUrl=grabLiveFrame();$('preview').src=imageDataUrl;$('preview').style.display='block';$('saveBtn').disabled=true;await recognizeNumber();setStatus('ocrStatus',$('reading').value?`Detected/updated reading: ${$('reading').value}. Check the number and edit it if necessary before saving.`:'No clear number detected. Adjust the camera and scan again, or type the reading manually.','good');}catch(err){setStatus('ocrStatus',err.message,'bad');}finally{liveScanBusy=false;$('liveScanBtn').disabled=!cameraStream;updateSaveState();}});
+$('captureBtn').addEventListener('click',()=>{try{imageDataUrl=grabLiveFrame();$('preview').src=imageDataUrl;$('preview').style.display='block';setStatus('ocrStatus','Photo captured from live camera. Tap “Scan live frame” to recognize the number, or type it manually.');updateSaveState();}catch(err){setStatus('ocrStatus',err.message,'bad');}});
+
+$('photo').addEventListener('change', async e=>{
+  const file=e.target.files && e.target.files[0]; if(!file)return;
+  $('saveBtn').disabled=true; $('scanBtn').disabled=true; $('reading').value=''; imageDataUrl=''; locationData=null;
+  setStatus('ocrStatus','Preparing photo…'); setStatus('saveStatus','');
+  try {
+    imageDataUrl=await resizeAsJpeg(file,1600,0.84);
+    $('preview').src=imageDataUrl; $('preview').style.display='block';
+    getLocation();
+    await recognizeNumber();
+  } catch(err){setStatus('ocrStatus','Could not process this photo. Try another photo. '+err.message,'bad');}
+  $('scanBtn').disabled=false; updateSaveState();
+});
+function resizeAsJpeg(file,maxSide,quality){return new Promise((resolve,reject)=>{const url=URL.createObjectURL(file),img=new Image();img.onload=()=>{let w=img.naturalWidth,h=img.naturalHeight;const s=Math.min(1,maxSide/Math.max(w,h));w=Math.round(w*s);h=Math.round(h*s);const c=document.createElement('canvas');c.width=w;c.height=h;c.getContext('2d').drawImage(img,0,0,w,h);URL.revokeObjectURL(url);resolve(c.toDataURL('image/jpeg',quality));};img.onerror=()=>{URL.revokeObjectURL(url);reject(new Error('Invalid image'));};img.src=url;});}
+async function recognizeNumber(){
+  if(!imageDataUrl)return;
+  setStatus('ocrStatus','Reading digits from photo… Please wait.');
+  try{
+    const result=await Tesseract.recognize(imageDataUrl,'eng',{logger:m=>{if(m.status==='recognizing text')setStatus('ocrStatus',`Reading digits… ${Math.round((m.progress||0)*100)}%`);}});
+    const raw=result.data.text||'';
+    // Remove common separators; retain a decimal point if present. User can always edit.
+    const candidates=raw.match(/\d[\d, ]{2,}(?:\.\d+)?|\d+(?:\.\d+)?/g)||[];
+    const cleaned=candidates.map(s=>s.replace(/[ ,]/g,'')).filter(s=>/^\d+(?:\.\d+)?$/.test(s));
+    if(cleaned.length){cleaned.sort((a,b)=>b.length-a.length);$('reading').value=cleaned[0];setStatus('ocrStatus',`Detected “${cleaned[0]}”. Please compare it with the photo and correct it if needed.`, 'good');}
+    else setStatus('ocrStatus','No clear number detected. Type the meter reading manually; the photo will still be saved.','bad');
+  }catch(err){setStatus('ocrStatus','Automatic reading failed. Type the number manually; the photo will still be saved.','bad');}
+  updateSaveState();
+}
+$('scanBtn').addEventListener('click',recognizeNumber);
+function getLocation(){
+  if(!navigator.geolocation){setStatus('locationStatus','This browser does not support location. Photo can still be saved without GPS.','bad');return;}
+  setStatus('locationStatus','Requesting location permission…');
+  navigator.geolocation.getCurrentPosition(pos=>{locationData={lat:pos.coords.latitude,lng:pos.coords.longitude,accuracy:Math.round(pos.coords.accuracy)};setStatus('locationStatus',`Location captured (accuracy about ${locationData.accuracy} m).`,'good');},err=>{locationData=null;setStatus('locationStatus','Location was not captured. Allow location permission and try again, or save without it if your policy permits.','bad');},{enableHighAccuracy:true,timeout:15000,maximumAge:0});
+}
+$('saveBtn').addEventListener('click',async()=>{
+  if(!WEB_APP_URL.startsWith('https://script.google.com/macros/s/')){alert('First paste the deployed Apps Script Web App URL into WEB_APP_URL in this HTML file.');return;}
+  if(!imageDataUrl||!$('reading').value.trim())return;
+  const payload={action:'saveReading',date:$('date').value,employee:$('employee').value,session:$('session').value,reading:$('reading').value.trim(),imageData:imageDataUrl,latitude:locationData?.lat??'',longitude:locationData?.lng??'',accuracy:locationData?.accuracy??'',capturedAt:new Date().toISOString()};
+  $('saveBtn').disabled=true;setStatus('saveStatus','Uploading photo and saving record to Google Sheets/Drive…');
+  try{
+    // URL-encoded POST avoids a CORS preflight for Apps Script web apps.
+    const body=new URLSearchParams();Object.entries(payload).forEach(([k,v])=>body.append(k,String(v)));
+    const response=await fetch(WEB_APP_URL,{method:'POST',body});
+    const result=await response.json();if(!result.ok)throw new Error(result.error||'Save failed');
+    setStatus('saveStatus',`Saved successfully.\nPhoto: ${result.photoUrl||'stored in Drive'}\n${result.mapUrl?'Location: '+result.mapUrl:''}`,'good');
+    $('photo').value='';$('preview').style.display='none';imageDataUrl='';locationData=null;$('reading').value='';$('scanBtn').disabled=true;
+  }catch(err){setStatus('saveStatus','Could not confirm cloud save: '+err.message+'\nDo not assume it was saved. Check your Google Sheet/Drive before retrying.','bad');}
+  updateSaveState();
+});
+window.addEventListener('pagehide',stopLiveCamera);
+</script></body></html>
